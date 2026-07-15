@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 
 import { isElectron } from "~/env";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
@@ -10,9 +10,9 @@ export type PreviewPanelMode = "inline" | "sheet" | "sidebar" | "embedded";
 
 const PREVIEW_PANEL_WIDTH_STORAGE_KEY = "t3code:preview-panel-width";
 const PREVIEW_PANEL_MIN_WIDTH = 360;
-/** Hard ceiling so a wide monitor can't yield a panel that swallows the chat. */
-const PREVIEW_PANEL_MAX_WIDTH_PX = 1400;
-/** Fraction of the viewport allowed; the panel is min(this · vw, MAX_PX). */
+/** Space reserved for the chat column when the panel is dragged to its max. */
+const PREVIEW_PANEL_CHAT_RESERVED_PX = 480;
+/** Fraction of the viewport always allowed, so narrow windows behave as before. */
 const PREVIEW_PANEL_MAX_WIDTH_FRACTION = 0.7;
 const PREVIEW_PANEL_DEFAULT_WIDTH = 540;
 
@@ -28,7 +28,8 @@ export function PreviewPanelShell(props: {
 }) {
   const useDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "embedded";
   const isInline = props.mode === "inline";
-  const maxWidth = useViewportClampedMaxWidth();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const maxWidth = usePanelRowClampedMaxWidth(rootRef, props.mode);
   const { width, handlers } = useResizableWidth({
     storageKey: PREVIEW_PANEL_WIDTH_STORAGE_KEY,
     defaultWidth: PREVIEW_PANEL_DEFAULT_WIDTH,
@@ -39,6 +40,7 @@ export function PreviewPanelShell(props: {
 
   return (
     <div
+      ref={rootRef}
       className={cn(
         "relative flex h-full min-h-0 min-w-0 flex-col self-stretch bg-background",
         isInline
@@ -59,28 +61,33 @@ export function PreviewPanelShell(props: {
 }
 
 /**
- * Track viewport width to derive a sensible upper bound for the panel.
- * Resize-aware so dragging the OS window narrower re-clamps the stored
- * width on the next render (the hook's clamp picks this up automatically).
+ * Track the width of the flex row hosting the panel (chat column + panel) to
+ * derive an upper bound that always leaves the chat column usable space.
+ * Measuring the row rather than the viewport keeps the reserve honest when
+ * the app sidebar takes part of the window. Resize-aware (window resizes and
+ * sidebar collapse/expand both change the row) so the stored width re-clamps
+ * on the next render (the hook's clamp picks this up automatically).
  */
-function useViewportClampedMaxWidth(): number {
-  const [vw, setVw] = useState(() => (typeof window === "undefined" ? 1280 : window.innerWidth));
+function usePanelRowClampedMaxWidth(
+  panelRef: RefObject<HTMLDivElement | null>,
+  mode: PreviewPanelMode,
+): number {
+  const [rowWidth, setRowWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    let frame = 0;
-    const onResize = () => {
-      // Coalesce rapid resize events into one rAF tick.
-      if (frame !== 0) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        setVw(window.innerWidth);
-      });
-    };
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
-      if (frame !== 0) window.cancelAnimationFrame(frame);
-    };
-  }, []);
-  return Math.min(PREVIEW_PANEL_MAX_WIDTH_PX, Math.floor(vw * PREVIEW_PANEL_MAX_WIDTH_FRACTION));
+    const row = panelRef.current?.parentElement;
+    if (!row) return;
+    const observer = new ResizeObserver(() => {
+      setRowWidth(row.clientWidth);
+    });
+    observer.observe(row);
+    return () => observer.disconnect();
+    // The panel remounts into a different parent when the mode changes.
+  }, [panelRef, mode]);
+  return Math.max(
+    PREVIEW_PANEL_MIN_WIDTH,
+    Math.floor(rowWidth * PREVIEW_PANEL_MAX_WIDTH_FRACTION),
+    rowWidth - PREVIEW_PANEL_CHAT_RESERVED_PX,
+  );
 }
